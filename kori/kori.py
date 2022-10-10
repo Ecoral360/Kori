@@ -70,10 +70,25 @@ class KoriTest:
     actions: list[KoriTestAction]
     before_each: bool = field(default=True, repr=False, kw_only=True)
     after_each: bool = field(default=True, repr=False, kw_only=True)
+    ignored_actions: list[KoriTestAction] = field(default_factory=list, kw_only=True)
 
-    @staticmethod
-    def _action_called(fn: Callable, ctx: KoriTestCtx):
+    def _should_ignore(self, ctx: KoriTestCtx, fn: Callable, *fn_args, **fn_kwargs) -> Optional[KoriTestActionResult]:
+        result = None
+        for ignored_action in self.ignored_actions:
+            try:
+                result = ignored_action.call(ctx, fn.__name__, *fn_args, **fn_kwargs)
+                if result.result_state.is_success():
+                    break
+                result = None
+            except Exception as e:
+                print(e)
+
+        return result
+
+    def _action_called(self, fn: Callable, ctx: KoriTestCtx):
         def action_wrapper(*fn_args, **fn_kwargs):
+            if result := self._should_ignore(ctx, fn, *fn_args, **fn_kwargs):
+                return result.function_result
             action: KoriTestAction = ctx.next_action()
             action_result = action.call(ctx, fn.__name__, *fn_args, **fn_kwargs)
             ctx.test_report.append(action_result)
@@ -97,8 +112,8 @@ class KoriTest:
         ctx = self._kori_test_context(iter_action, test_report)
         try:
             exec(code, ctx.globals_, ctx.locals_)
-        except _KoriExitTest:
-            pass
+        except _KoriExitTest as e:
+            print(e)
 
         while (action := ctx.next_action()) is not None:
             print(f"Not called: {action.name}")
@@ -136,6 +151,16 @@ class KoriTestState:
     def success(cls):
         return cls()
 
+    def err_into_warn(self):
+        return KoriTestState(outcome="Success", warnings=self.warnings + [
+            KoriTestWarning(error.name, error.expected, error.actual) for error in self.errors
+        ])
+
+    def warn_into_err(self):
+        return KoriTestState(outcome="Success", errors=self.errors + [
+            KoriTestError(warning.name, warning.expected, warning.actual) for warning in self.warnings
+        ])
+
     def is_failure(self):
         return self.outcome == "Failure"
 
@@ -172,6 +197,7 @@ class KoriTestAction:
     action_args: list[Any] = field(default_factory=list, kw_only=True)
     on_fail: Optional[KoriTestSubAction] = None
     on_success: Optional[KoriTestSubAction] = None
+    only_warns: bool = False
 
     def _call_sub_actions(self, ctx: KoriTestCtx, fn_name: str) -> list[KoriTestSubActionReport]:
         sub_action_results = []
@@ -190,12 +216,16 @@ class KoriTestAction:
 
     def call(self, ctx: KoriTestCtx, fn_name: str, *fn_args, **fn_kwargs) -> KoriTestActionResult:
         if self.mocked_fn is not None and self.mocked_fn.__name__ != fn_name:
-            action_state, function_result = KoriTestState.fail(), None  # TODO add error
+            action_state, function_result = KoriTestState.fail(
+                KoriTestError("<invalid call>", self.mocked_fn.__name__, fn_name)
+            ), KoriEarlyExit()
         else:
             if "fn_name" in self.action.__code__.co_varnames:  # type: ignore
                 action_state, function_result = self.action(ctx, *fn_args, **fn_kwargs, fn_name=fn_name)  # type: ignore
             else:
                 action_state, function_result = self.action(ctx, *fn_args, **fn_kwargs)
+            if self.only_warns and action_state.is_failure():
+                action_state = action_state.err_into_warn()
         sub_action_results = self._call_sub_actions(ctx, fn_name)
         result_state = KoriTestState.combine(action_state,
                                              *[sub_action_result.result_state for sub_action_result
@@ -215,6 +245,10 @@ class KoriTestAction:
             sub_actions_reports=sub_action_results
         )
         return result
+
+    def warn_only(self):
+        self.only_warns = True
+        return self
 
     def also(self, *sub_actions: KoriTestSubAction):
         self.sub_actions += sub_actions
@@ -353,7 +387,7 @@ class KoriResultFormatter:
         name = test_result.name
         test_reports = test_result.test_reports
         final_result = KoriTestState.combine(*[report.result_state for report in test_reports])
-        formatted_result = f"{name}: {final_result.outcome}"
+        formatted_result = f"{name}: {final_result.outcome}\n"
         for report in test_reports:
             action_formatted = self._format_test_report(report.action_report)
             sub_action_formatted = "".join(map(self._format_test_report, report.sub_actions_reports))

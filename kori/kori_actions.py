@@ -10,35 +10,30 @@ def when(action: KoriTestAction, sub_action: KoriTestSubAction) -> KoriTestActio
     return action.also(sub_action)
 
 
-def prints(*message: str, sep: str = " ", end: str = "\n"):
-    expected_message = sep.join(message) + end
+def prints(expected_message: str | re.Pattern, ignore: str | re.Pattern = "\n"):
+    is_regex = isinstance(expected_message, re.Pattern)
 
     def inner_prints(_ctx: KoriTestCtx, *args, **kwargs) -> tuple[KoriTestState, None]:
         actual_sep = kwargs.get("sep", " ")
         actual_end = kwargs.get("end", "\n")
         actual = actual_sep.join(args) + actual_end
+
+        if isinstance(ignore, re.Pattern):
+            actual = "".join(ignore.split(actual))
+        else:
+            actual = actual.replace(ignore, "")
+
+        if is_regex:
+            if expected_message.match(actual) is None:
+                return KoriTestState.fail(KoriTestError("prints", expected_message.pattern, actual)), None
+            return KoriTestState.success(), None
+
+        # expected_message is not a regex
         if expected_message != actual:
             return KoriTestState.fail(KoriTestError("prints", expected_message, actual)), None
         return KoriTestState.success(), None
 
     return KoriTestAction("prints", inner_prints, print, action_args=[expected_message])
-
-
-def print_matches(regex: re.Pattern, is_err: bool = True):
-    def inner_print_matches(_ctx: KoriTestCtx, *args, **kwargs) -> tuple[KoriTestState, None]:
-        actual_sep = kwargs.get("sep", " ")
-        actual_end = kwargs.get("end", "\n")
-        actual = actual_sep.join(args) + actual_end
-        if regex.match(actual) is None:
-            if is_err:
-                return KoriTestState.fail(KoriTestError("print_matches", regex.pattern, actual)), None
-            else:
-                return KoriTestState.warn(
-                    KoriTestWarning("print_matches", regex.pattern, actual)
-                ), None
-        return KoriTestState.success(), None
-
-    return KoriTestAction("print_matches", inner_print_matches, print, action_args=[regex])
 
 
 def asks_for_input(expected_prompt: str, injected_value: str):
@@ -83,18 +78,16 @@ def assert_var_equals(var_name: str, expected_value: Any):
     def inner(ctx: KoriTestCtx) -> KoriTestState:
         try:
             actual_value = eval(var_name, ctx.globals_, ctx.locals_)
-        except NameError:
+        except NameError as e:
             return KoriTestState.fail(
-                KoriTestError("Var not defined",
-                              f"Value {expected_value!r} for var {var_name!r}",
-                              f"Var {var_name!r} was not defined")
+                KoriTestError(f"Var {var_name!r} not defined",
+                              expected_value, str(e))
             )
         else:
             if actual_value != expected_value:
                 return KoriTestState.fail(
-                    KoriTestError("Invalid value for variable",
-                                  f"Value {expected_value!r} for var {var_name!r}",
-                                  actual_value)
+                    KoriTestError(f"Invalid value for variable {var_name!r}",
+                                  expected_value, actual_value)
                 )
             return KoriTestState.success()
 
