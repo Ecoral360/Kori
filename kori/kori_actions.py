@@ -10,6 +10,9 @@ def when(action: KoriTestAction, sub_action: KoriTestSubAction) -> KoriTestActio
     return action.also(sub_action)
 
 
+def one_of(actions: KoriTestAction) -> KoriTestAction:
+    pass
+
 def prints(expected_message: str | re.Pattern, ignore: str | re.Pattern = "\n"):
     is_regex = isinstance(expected_message, re.Pattern)
 
@@ -33,7 +36,7 @@ def prints(expected_message: str | re.Pattern, ignore: str | re.Pattern = "\n"):
             return KoriTestState.fail(KoriTestError("prints", expected_message, actual)), None
         return KoriTestState.success(), None
 
-    return KoriTestAction("prints", inner_prints, print, action_args=[expected_message])
+    return KoriTestAction("prints", inner_prints, [print], action_args=[expected_message])
 
 
 def asks_for_input(expected_prompt: str, injected_value: str):
@@ -45,14 +48,14 @@ def asks_for_input(expected_prompt: str, injected_value: str):
 
         return KoriTestState.success(), injected_value
 
-    return KoriTestAction("asks_for_input", inner_asks_for_input, input, action_args=[expected_prompt, injected_value])
+    return KoriTestAction("asks_for_input", inner_asks_for_input, [input], action_args=[expected_prompt, injected_value])
 
 
 def simulate_input(injected_value: str):
     def inner_simulate_input(_ctx: KoriTestCtx, _prompt: str = "") -> tuple[KoriTestState, str]:
         return KoriTestState.success(), injected_value
 
-    return KoriTestAction("simulates_input", inner_simulate_input, input, action_args=[injected_value])
+    return KoriTestAction("simulates_input", inner_simulate_input, [input], action_args=[injected_value])
 
 
 def ignore_rest():

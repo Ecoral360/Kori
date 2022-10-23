@@ -100,9 +100,10 @@ class KoriTest:
 
     def _kori_test_context(self, iter_action, test_report: list[KoriTestActionResult]) -> KoriTestCtx:
         ctx = KoriTestCtx({}, {}, iter_action, test_report)
-        for action in self.actions:
-            if action.mocked_fn is not None:
-                ctx.globals_[action.mocked_fn.__name__] = self._action_called(action.mocked_fn, ctx)
+        actions_with_mock = (action for action in [act for act in self.actions if act.mocked_fn is not None])
+        mocked_functions = {mocked_fn for action in actions_with_mock for mocked_fn in action.mocked_fn}
+        for fn in mocked_functions:
+            ctx.globals_[fn.__name__] = self._action_called(fn, ctx)
         return ctx
 
     def run_test(self, code: str) -> KoriTestResult:
@@ -192,7 +193,7 @@ class KoriTestState:
 class KoriTestAction:
     name: str
     action: Callable[[KoriTestCtx, ...], tuple[KoriTestState, Any]]
-    mocked_fn: Optional[Callable] = None
+    mocked_fn: Optional[list[Callable]] = None
     sub_actions: list[KoriTestSubAction] = field(default_factory=list, kw_only=True)
     action_args: list[Any] = field(default_factory=list, kw_only=True)
     on_fail: Optional[KoriTestSubAction] = None
@@ -214,10 +215,15 @@ class KoriTestAction:
 
         return sub_action_results
 
+    def mocked_fn_names(self):
+        if self.mocked_fn is None:
+            return []
+        return [mocked_fn.__name__ for mocked_fn in self.mocked_fn]
+
     def call(self, ctx: KoriTestCtx, fn_name: str, *fn_args, **fn_kwargs) -> KoriTestActionResult:
-        if self.mocked_fn is not None and self.mocked_fn.__name__ != fn_name:
+        if self.mocked_fn is not None and fn_name not in self.mocked_fn_names():
             action_state, function_result = KoriTestState.fail(
-                KoriTestError("<invalid call>", self.mocked_fn.__name__, fn_name)
+                KoriTestError("<invalid call>", self.mocked_fn_names(), fn_name)
             ), KoriEarlyExit()
         else:
             if "fn_name" in self.action.__code__.co_varnames:  # type: ignore
