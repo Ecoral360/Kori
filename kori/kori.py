@@ -32,7 +32,7 @@ class KoriTestConfig:
 @dataclass
 class KoriTestSuite:
     config: KoriTestConfig = KoriTestConfig()
-    tests: list[KoriTest] = field(default_factory=list)
+    tests: list[KoriTest | KoriTestGroup] = field(default_factory=list)
 
     def __post_init__(self):
         for test in [t for t in self.tests if t.config is None]:
@@ -60,7 +60,7 @@ class KoriTestSuiteResult:
     parent: KoriTestSuite
     code: str
     team: list[str]
-    test_results: list[KoriTestResult]
+    test_results: list[KoriTestResult | KoriTestGroupResult]
 
     def generate_result_file(self, dest_folder: str, *, file_prefix: str):
         if not os.path.exists(dest_folder):
@@ -73,9 +73,42 @@ class KoriTestSuiteResult:
 
 
 @dataclass
+class KoriTestGroup:
+    name: str
+    tests: list[KoriTest]
+    _config: KoriTestConfig = field(default=None, kw_only=True)
+
+    @property
+    def config(self):
+        return self._config
+
+    @config.setter
+    def config(self, config: KoriTestConfig):
+        self._config = config
+        for test in [t for t in self.tests if t.config is None]:
+            test.config = self.config
+
+    def run_test(self, code: str, file_path: str) -> KoriTestGroupResult:
+        test_results = [test.run_test(code, file_path) for test in self.tests]
+        final_state = KoriTestState.combine(*[test_result.final_state for test_result in test_results])
+        return KoriTestGroupResult(self, final_state, test_results)
+
+
+@dataclass
+class KoriTestGroupResult:
+    parent: KoriTestGroup
+    final_state: KoriTestState
+    test_results: list[KoriTestResult]
+
+    @property
+    def name(self):
+        return self.parent.name
+
+
+@dataclass
 class KoriTest:
     name: str
-    actions: list[KoriTestAction]
+    actions: list[KoriTestAction | list]
     _config: KoriTestConfig = field(default=None, kw_only=True)
     mocked_modules: list[str] = field(default_factory=list, kw_only=True)
 
@@ -562,7 +595,19 @@ class KoriResultFormatter:
             result += "\n" + "\n".join(cls._format_error_or_warning(err, err_indent) for err in state.errors)
         return result + f"\n{err_indent}--\n"
 
-    def _format_test_reports(self, test_result: KoriTestResult):
+    def _format_test_group_result(self, test_result: KoriTestGroupResult):
+        name = test_result.name
+        test_results = test_result.test_results
+        final_result = test_result.final_state
+        formatted_result = f"{name}: {final_result.outcome + ' with warnings' * final_result.has_warning()}\n\t"
+        for result in test_results:
+            formatted_result += "\n\t\t".join(self._format_test_reports(result).split("\n"))
+        return formatted_result
+
+    def _format_test_reports(self, test_result: KoriTestResult | KoriTestGroupResult):
+        if isinstance(test_result, KoriTestGroupResult):
+            return self._format_test_group_result(test_result)
+
         name = test_result.name
         test_reports = test_result.test_reports
         final_result = test_result.final_state
