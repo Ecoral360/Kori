@@ -14,7 +14,7 @@ import importlib
 class Kori:
     test_suite: KoriTestSuite
 
-    def run_kori(self, folder_path: str, *, file_prefix: str) -> list[KoriTestSuiteResult]:
+    def run_test_kori(self, folder_path: str, *, file_prefix: str) -> list[KoriTestSuiteResult]:
         files = os.listdir(folder_path)
         return [self.test_suite.run_suite(f"{folder_path}/{file}") for file in files if file.startswith(file_prefix)]
 
@@ -139,6 +139,7 @@ class KoriTest:
         mocked_functions = {mocked_fn for action in actions_with_mock for mocked_fn in action.mocked_fn}
         for fn in mocked_functions:
             ctx.globals_[fn.__name__] = self._action_called(fn, ctx)
+        ctx.locals_ = ctx.globals_
         return ctx
 
     def _mock_modules(self, code: str, ctx: KoriTestCtx):
@@ -184,13 +185,13 @@ class KoriTest:
         err = None
         not_called = []
         try:
-            exec(code, ctx.globals_, ctx.locals_)
+            exec(compile(code, file_path, mode="exec"), ctx.globals_, ctx.locals_)
         except _KoriExitTest:
             # print(e)
             pass
-        except Exception as e:
+        except BaseException as e:
             print(f"Execption in {file_path}: \n{e}", file=sys.stderr)
-            err = _KoriPythonError(f"{e.__class__.__name__} at {e.__traceback__.tb_lineno}: \n{e}")
+            err = _KoriPythonError(f"{e.__class__.__name__}: \n{e}")
         finally:
             while (action := ctx.next_action(force_next=True)) is not None:
                 not_called.append(action)
@@ -571,8 +572,9 @@ class KoriResultFormatter:
             sub_action_formatted = "".join(map(self._format_test_report, report.sub_actions_reports))
             formatted_result += action_formatted + sub_action_formatted
 
-        formatted_result += "\n\t" * (len(test_result.not_called) > 0) + "\n\t".join(
-            f"not called: {action.action_name}" for action in test_result.not_called
+        formatted_result += "\n\tnot called: \n\t" * (len(test_result.not_called) > 0) + "".join(
+            f"{action.action_name!r}, " + "\n\t" * (i % 5 == 0)
+            for i, action in enumerate(test_result.not_called, start=1)
         ) + "\n"
 
         if test_result.error is not None:

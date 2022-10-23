@@ -2,7 +2,7 @@
 import re
 from typing import Any, Callable, Optional, overload, TypeAlias
 
-from kori_old.kori import KoriTestAction, KoriTestSubAction, KoriTestState, KoriTestError, KoriTestCtx, \
+from kori.kori import KoriTestAction, KoriTestSubAction, KoriTestState, KoriTestError, KoriTestCtx, \
     KoriTestActionResult, KoriTestFail
 
 StrTest = str | re.Pattern | list[str]
