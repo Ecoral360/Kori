@@ -5,7 +5,7 @@ from typing import Any, Callable, Optional, overload, TypeAlias
 from kori.kori import KoriTestAction, KoriTestSubAction, KoriTestState, KoriTestError, KoriTestCtx, \
     KoriTestActionResult, KoriTestFail
 
-StrTest = str | re.Pattern | list[str]
+StrTest = str | re.Pattern | list[str | re.Pattern]
 
 
 def remove_ignored(s: str | re.Pattern, ignored: str):

@@ -4,6 +4,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
+from threading import Timer
 from typing import Optional, Literal, TypeAlias, Callable, Any, Iterator
 import importlib
 
@@ -19,6 +20,9 @@ class Kori:
         return [self.test_suite.run_suite(f"{folder_path}/{file}") for file in files if file.startswith(file_prefix)]
 
 
+_MISSING = object()
+
+
 @dataclass(kw_only=True)
 class KoriTestConfig:
     before: list[KoriTestAction] = field(default_factory=list)
@@ -28,6 +32,12 @@ class KoriTestConfig:
     default_state_on_fail: KoriStateOnFail = field(default="Warning")
     actions_state_on_fail: dict[str, KoriStateOnFail] = field(default_factory=dict)
 
+    def with_fields(self, **kwargs):
+        return KoriTestConfig(**(self.__dict__ | kwargs))
+
+
+DEFAULT_CONFIG = KoriTestConfig()
+
 
 @dataclass
 class KoriTestSuite:
@@ -35,7 +45,7 @@ class KoriTestSuite:
     tests: list[KoriTest | KoriTestGroup] = field(default_factory=list)
 
     def __post_init__(self):
-        for test in [t for t in self.tests if t.config is None]:
+        for test in [t for t in self.tests if t.config is DEFAULT_CONFIG]:
             test.config = self.config
 
     @staticmethod
@@ -72,11 +82,13 @@ class KoriTestSuiteResult:
             f.writelines(lines)
 
 
-@dataclass
 class KoriTestGroup:
-    name: str
-    tests: list[KoriTest]
-    _config: KoriTestConfig = field(default=None, kw_only=True)
+
+    def __init__(self, name: str, tests: list[KoriTest], *, config: KoriTestConfig = DEFAULT_CONFIG):
+        self.name = name
+        self.tests = tests
+        self._config: KoriTestConfig
+        self.config = config
 
     @property
     def config(self):
@@ -85,8 +97,8 @@ class KoriTestGroup:
     @config.setter
     def config(self, config: KoriTestConfig):
         self._config = config
-        for test in [t for t in self.tests if t.config is None]:
-            test.config = self.config
+        for test in [t for t in self.tests if t.config is DEFAULT_CONFIG]:
+            test.config = self._config
 
     def run_test(self, code: str, file_path: str) -> KoriTestGroupResult:
         test_results = [test.run_test(code, file_path) for test in self.tests]
@@ -105,15 +117,13 @@ class KoriTestGroupResult:
         return self.parent.name
 
 
-@dataclass
 class KoriTest:
-    name: str
-    actions: list[KoriTestAction | list]
-    _config: KoriTestConfig = field(default=None, kw_only=True)
-    mocked_modules: list[str] = field(default_factory=list, kw_only=True)
-
-    def __post_init__(self):
-        self.actions = flatten(self.actions)
+    def __init__(self, name: str, actions: list[KoriTestAction | list], *, config: KoriTestConfig = DEFAULT_CONFIG,
+                 mocked_modules: list[str] = None):
+        self.name = name
+        self.actions = flatten(actions)
+        self._config = config
+        self.mocked_modules = mocked_modules or []
 
     @property
     def config(self):
@@ -152,6 +162,9 @@ class KoriTest:
 
             action = ctx.next_action()
 
+            if action is None:
+                raise _KoriNoMoreTests()
+
             action_report = action.call(ctx, fn.__name__, *fn_args, **fn_kwargs)
             ctx.test_report.append(action_report)
 
@@ -166,9 +179,10 @@ class KoriTest:
 
         return action_wrapper
 
-    def _kori_test_context(self, iter_action, test_report: list[KoriTestActionReport]) -> KoriTestCtx:
-        ctx = KoriTestCtx({}, {}, self, iter_action, test_report)
-        actions_with_mock = (action for action in [act for act in self.actions if act.mocked_fn is not None])
+    def _kori_test_context(self, iter_action: list[KoriTestAction],
+                           test_report: list[KoriTestActionReport]) -> KoriTestCtx:
+        ctx = KoriTestCtx({}, {}, self, iter(iter_action), test_report)
+        actions_with_mock = (action for action in [act for act in iter_action if act.mocked_fn is not None])
         mocked_functions = {mocked_fn for action in actions_with_mock for mocked_fn in action.mocked_fn}
         for fn in mocked_functions:
             ctx.globals_[fn.__name__] = self._action_called(fn, ctx)
@@ -208,8 +222,9 @@ class KoriTest:
 
         return code
 
+    #
     def run_test(self, code: str, file_path: str) -> KoriTestResult:
-        iter_action = iter(self.actions)
+        iter_action = flatten([self.config.before, self.actions, self.config.after])
         test_report: list[KoriTestActionReport] = []
 
         ctx = self._kori_test_context(iter_action, test_report)
@@ -217,8 +232,14 @@ class KoriTest:
         code = self._mock_modules(code, ctx)
         err = None
         not_called = []
+
+        def timelimit():
+            raise SystemExit(f"Timed out for test {self.name!r} in file {file_path!r}")
+
         try:
+            timer = Timer(3.0, timelimit)
             exec(compile(code, file_path, mode="exec"), ctx.globals_, ctx.locals_)
+            timer.cancel()
         except _KoriExitTest:
             # print(e)
             pass
@@ -422,12 +443,6 @@ class KoriTestCtx:
             self.current_action = next_action
             return next_action
 
-    def peek_next_action(self):
-        """Returns the next action without consuming it"""
-        next_action = next(self.iter_actions)
-        self.iter_actions = iter([next_action, *self.iter_actions])
-        return next_action
-
     def read_stdout(self):
         """Returns stdout and resets it in the ctx"""
         stdout = self._stdout
@@ -527,7 +542,7 @@ class _KoriPythonError(BaseException):
 
 class _KoriNoMoreTests(BaseException):
     def __init__(self):
-        super().__init__()
+        super().__init__("There are no more actions defined in this test, did you forget to add `ignore_rest()` ?")
 
 
 class KoriTestFail:
@@ -582,6 +597,7 @@ class KoriResultFormatter:
             state = test_report.action_result.result_state
         icon = cls._get_state_icon(state)
         indent = "\t" * (is_sub_action + 1)
+
         action_args = f": {', '.join(map(repr, test_report.action_args))}" if test_report.action_args else ""
         result = f"{indent}[{icon}] {test_report.action_name}{action_args}"
 
