@@ -4,7 +4,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from threading import Timer
+from threading import Thread
 from typing import Optional, Literal, TypeAlias, Callable, Any, Iterator
 import importlib
 
@@ -31,6 +31,7 @@ class KoriTestConfig:
     ignored_actions: list[KoriTestAction] = field(default_factory=list)
     default_state_on_fail: KoriStateOnFail = field(default="Warning")
     actions_state_on_fail: dict[str, KoriStateOnFail] = field(default_factory=dict)
+    test_timeout: float = 3.0
 
     def with_fields(self, **kwargs):
         return KoriTestConfig(**(self.__dict__ | kwargs))
@@ -222,6 +223,19 @@ class KoriTest:
 
         return code
 
+    def _execute_code(self, code: str, file_path: str, ctx: KoriTestCtx, err: list[_KoriPythonError]):
+        end_by_raise = False
+
+        try:
+            exec(compile(code, file_path, mode="exec"), ctx.globals_, ctx.locals_)
+
+        except _KoriExitTest:
+            end_by_raise = True
+
+        except BaseException as e:
+            print(f"Execption in {file_path}: \n{e}", file=sys.stderr)
+            err.append(_KoriPythonError(f"{e.__class__.__name__}: \n{e}"))
+
     #
     def run_test(self, code: str, file_path: str) -> KoriTestResult:
         iter_action = flatten([self.config.before, self.actions, self.config.after])
@@ -230,32 +244,37 @@ class KoriTest:
         ctx = self._kori_test_context(iter_action, test_report)
 
         code = self._mock_modules(code, ctx)
-        err = None
+        err = []
         not_called = []
+        end_by_raise = False
 
-        def timelimit():
-            raise SystemExit(f"Timed out for test {self.name!r} in file {file_path!r}")
+        execution = Thread(target=self._execute_code, args=(code, file_path, ctx, err), daemon=True)
 
-        try:
-            timer = Timer(3.0, timelimit)
-            exec(compile(code, file_path, mode="exec"), ctx.globals_, ctx.locals_)
-            timer.cancel()
-        except _KoriExitTest:
-            # print(e)
-            pass
-        except BaseException as e:
-            print(f"Execption in {file_path}: \n{e}", file=sys.stderr)
-            err = _KoriPythonError(f"{e.__class__.__name__}: \n{e}")
-        finally:
-            while (action := ctx.next_action(force_next=True)) is not None:
-                not_called.append(action)
+        timeout = self.config.test_timeout
+
+        execution.start()
+        execution.join(timeout)
+
+        if execution.is_alive():  # the execution timed out
+            print(f"Time out in {file_path}: \nThe execution of the test took more than {timeout} seconds.",
+                  file=sys.stderr)
+            err.append(_KoriTestInterrupt(f"Timed out: \nThe execution of the test took more than {timeout} seconds."
+                                          f" Probably because of an infinite loop"))
 
         state = KoriTestState.combine(*[report.result_state for report in test_report])
-        if err is not None:
+        if len(err) > 0:
             state.outcome = "Failure"
             state.errors.append(KoriTestError("Python error", "-", str(err)))
+
+        # if not end_by_raise and len(not_called) > 0:
+        #     state.outcome = "Failure"
+        #     state.errors.append(KoriTestError("The program stoped before the test was over", "-", "-"))
+
+        while (next_action := ctx.next_action(force_next=True)) is not None:
+            not_called.append(next_action)
+
         return KoriTestResult(self, state,
-                              test_report, not_called=not_called, error=err)
+                              test_report, not_called=not_called, errors=err[0] if err else None)
 
 
 @dataclass
@@ -264,7 +283,7 @@ class KoriTestResult:
     final_state: KoriTestState
     test_reports: list[KoriTestActionReport]
     not_called: list[KoriTestAction]
-    error: _KoriPythonError | None = field(default=None, kw_only=True)
+    errors: list[KoriTestError] = field(default=None, kw_only=True)
 
     @property
     def name(self):
@@ -529,6 +548,10 @@ class KoriTestSubActionReport:
 
 # ############################# Errors & Warnings ############################# #
 
+class _KoriImportantErrors(BaseException):
+    def __init__(self, msg: str):
+        super().__init__(msg)
+
 
 class _KoriExitTest(BaseException):
     def __init__(self):
@@ -543,6 +566,11 @@ class _KoriPythonError(BaseException):
 class _KoriNoMoreTests(BaseException):
     def __init__(self):
         super().__init__("There are no more actions defined in this test, did you forget to add `ignore_rest()` ?")
+
+
+class _KoriTestInterrupt(_KoriPythonError):
+    def __init__(self, msg: str):
+        super().__init__(msg)
 
 
 class KoriTestFail:
@@ -638,9 +666,9 @@ class KoriResultFormatter:
             for i, action in enumerate(test_result.not_called, start=1)
         ) + "\n"
 
-        if test_result.error is not None:
-            err_msg = str(test_result.error).replace("\n", "\n\t")
-            formatted_result += f"\n\t❌PYTHON ERROR❌: {err_msg}\n"
+        if test_result.errors is not None:
+            err_msg = str(test_result.errors).replace("\n", "\n\t")
+            formatted_result += f"\n\t❌ERROR❌: {err_msg}\n"
         return formatted_result
 
     def _format_success_rate(self) -> str:

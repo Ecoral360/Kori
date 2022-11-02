@@ -8,31 +8,37 @@ from kori.kori import KoriTestAction, KoriTestSubAction, KoriTestState, KoriTest
 StrTest = str | re.Pattern | list[str | re.Pattern]
 
 
-def remove_ignored(s: str | re.Pattern, ignored: str):
+def remove_ignored(s: str | re.Pattern, ignored: str | None, ignore_case: bool = True):
+    if ignored is None:
+        return s
+
     s_is_regex = isinstance(s, re.Pattern)
     if isinstance(ignored, re.Pattern):
         if s_is_regex:
-            s = re.compile("".join(ignored.split(s.pattern)), s.flags | re.I)
+            s = re.compile("".join(ignored.split(s.pattern)), s.flags | (ignore_case and re.I))
         else:
             s = "".join(ignored.split(s))
     else:
         if s_is_regex:
-            s = re.compile(s.pattern.replace(ignored, ""), s.flags | re.I)
+            s = re.compile(s.pattern.replace(ignored, ""), s.flags | (ignore_case and re.I))
         else:
             s = s.replace(s, "")
     return s
 
 
-def str_match(expected: StrTest, actual: str, ignore: str | re.Pattern = re.compile("\n| *")) -> \
-        tuple[bool, tuple[str, str]]:
+def str_match(expected: StrTest, actual: str, ignore: str | re.Pattern | None = re.compile("\n| *"),
+              ignore_case: bool = True) -> tuple[bool, tuple[str, str]]:
     original_expected = expected
     original_actual = actual
     actual = remove_ignored(actual, ignore)
 
     if isinstance(expected, list):
-        expected = [remove_ignored(s, ignore) for s in expected]
-        matches = all(
-            (s.lower() in actual.lower()) if isinstance(s, str) else s.search(actual) is not None for s in expected)
+        expected = [remove_ignored(s, ignore, ignore_case) for s in expected]
+
+        def compare_s(s, actual_s): return s.lower() in actual_s.lower() if ignore_case else s in actual_s
+
+        matches = all(compare_s(s, actual) if isinstance(s, str) else s.search(actual) is not None for s in expected)
+
         return matches, (original_expected, original_actual)
 
     expected = remove_ignored(expected, ignore)
@@ -101,10 +107,24 @@ def asks_for_input(expected_prompt: StrTest, injected_value: str) -> KoriTestAct
 
 
 def simulate_randint(expected_range: range, result: int) -> KoriTestAction:
-    from random import randint
+    from random import randint, randrange, choice
 
-    def inner_simulate_randint(_ctx: KoriTestCtx, *args, **_kwargs) -> KoriTestActionResult:
-        start, stop = args
+    def inner_simulate_randint(ctx: KoriTestCtx, *args, **_kwargs) -> KoriTestActionResult:
+        if ctx.current_fn.__name__ == "choice":
+            choices = args[0]
+            start, stop = min(choices), max(choices)
+            if not all(expected == actual for expected, actual in zip(range(start, stop + 1), choices)):
+                return KoriTestActionResult.fail(KoriTestFail(
+                    "Invalid range",
+                    f"start={expected_range.start}, stop={expected_range.stop}",
+                    f"{start=}, {stop=}, with {choices=}"
+                ), result)
+        else:
+            start, stop = args
+
+        if ctx.current_fn.__name__ == "randrange":
+            stop -= 1
+
         if expected_range.start != start or expected_range.stop != stop:
             return KoriTestActionResult.fail(KoriTestFail(
                 "Invalid range",
@@ -114,7 +134,8 @@ def simulate_randint(expected_range: range, result: int) -> KoriTestAction:
 
         return KoriTestActionResult.success(result)
 
-    return KoriTestAction("simulate_randint", inner_simulate_randint, [randint], action_args=[])
+    return KoriTestAction("simulate_randint", inner_simulate_randint,
+                          [choice, randint, randrange], action_args=[result])
 
 
 @overload
@@ -207,18 +228,20 @@ def assert_var_equals(var_name: str, expected_value: Any):
     return KoriTestSubAction(action_name="assert_var_equals", action=inner, action_args=[var_name, expected_value])
 
 
-def assert_stdout_matches(expected_stdout: StrTest, ignore: StrTest = re.compile(r"\n| *")):
+def assert_stdout_matches(expected_stdout: StrTest, ignore: StrTest | None = re.compile(r"\n| *"),
+                          ignore_case: bool = True, flush_stdout: bool = True):
     def inner_assert_stdout_matches(ctx: KoriTestCtx) -> KoriTestState:
-        stdout = ctx.read_stdout()
+        stdout = ctx.read_stdout() if flush_stdout else ctx.peek_stdout()
 
-        matches, expected_actual = str_match(expected_stdout, stdout, ignore)
+        matches, expected_actual = str_match(expected_stdout, stdout, ignore, ignore_case)
 
         if not matches:
             return KoriTestState.err(KoriTestError("assert_stdout_matches", *expected_actual))
 
         return KoriTestState.success()
 
-    return KoriTestSubAction("assert_stdout_matches", inner_assert_stdout_matches, [expected_stdout, ignore])
+    return KoriTestSubAction("assert_stdout_matches", inner_assert_stdout_matches,
+                             [expected_stdout, ignore, f"ignore_case={ignore_case}"])
 
 
 def assert_stdout_contains(*sub_str: StrTest):
