@@ -1,21 +1,21 @@
 from __future__ import annotations
 
+import importlib
 import os
 import re
 import sys
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import Optional, Literal, TypeAlias, Callable, Any, Iterator
-import importlib
 
 
 # ############################# Kori ############################# #
 
 @dataclass
 class Kori:
-    test_suite: KoriTestSuite
+    test_suite: KTSuite
 
-    def run_test_kori(self, folder_path: str, *, file_prefix: str) -> list[KoriTestSuiteResult]:
+    def run_test_kori(self, folder_path: str, *, file_prefix: str) -> list[KTSuiteResult]:
         files = os.listdir(folder_path)
         return [self.test_suite.run_suite(f"{folder_path}/{file}") for file in files if file.startswith(file_prefix)]
 
@@ -24,26 +24,26 @@ _MISSING = object()
 
 
 @dataclass(kw_only=True)
-class KoriTestConfig:
-    before: list[KoriTestAction] = field(default_factory=list)
-    after: list[KoriTestAction] = field(default_factory=list)
+class KTConfig:
+    before: list[KTAction] = field(default_factory=list)
+    after: list[KTAction] = field(default_factory=list)
     capture_stdout: bool = field(default=False)
-    ignored_actions: list[KoriTestAction] = field(default_factory=list)
+    ignored_actions: list[KTAction] = field(default_factory=list)
     default_state_on_fail: KoriStateOnFail = field(default="Warning")
     actions_state_on_fail: dict[str, KoriStateOnFail] = field(default_factory=dict)
     test_timeout: float = 3.0
 
     def with_fields(self, **kwargs):
-        return KoriTestConfig(**(self.__dict__ | kwargs))
+        return KTConfig(**(self.__dict__ | kwargs))
 
 
-DEFAULT_CONFIG = KoriTestConfig()
+DEFAULT_CONFIG = KTConfig()
 
 
 @dataclass
-class KoriTestSuite:
-    config: KoriTestConfig = KoriTestConfig()
-    tests: list[KoriTest | KoriTestGroup] = field(default_factory=list)
+class KTSuite:
+    config: KTConfig = KTConfig()
+    tests: list[KoriTest | KTGroup] = field(default_factory=list)
 
     def __post_init__(self):
         for test in [t for t in self.tests if t.config is DEFAULT_CONFIG]:
@@ -57,21 +57,21 @@ class KoriTestSuite:
         names = file_without_ext.split("_")[1:]
         return [re.sub(r"[A-Z][a-z\-]+", add_space, name).strip() for name in names]
 
-    def run_suite(self, file_path: str) -> KoriTestSuiteResult:
+    def run_suite(self, file_path: str) -> KTSuiteResult:
         with open(file_path, "r", encoding="utf8") as f:
             code = "\n".join(f.readlines())
 
         test_results = [test.run_test(code, file_path) for test in self.tests]
 
-        return KoriTestSuiteResult(self, code, self._extract_team(file_path), test_results)
+        return KTSuiteResult(self, code, self._extract_team(file_path), test_results)
 
 
 @dataclass
-class KoriTestSuiteResult:
-    parent: KoriTestSuite
+class KTSuiteResult:
+    parent: KTSuite
     code: str
     team: list[str]
-    test_results: list[KoriTestResult | KoriTestGroupResult]
+    test_results: list[KTResult | KoriTestGroupResult]
 
     def generate_result_file(self, dest_folder: str, *, file_prefix: str):
         if not os.path.exists(dest_folder):
@@ -83,12 +83,12 @@ class KoriTestSuiteResult:
             f.writelines(lines)
 
 
-class KoriTestGroup:
+class KTGroup:
 
-    def __init__(self, name: str, tests: list[KoriTest], *, config: KoriTestConfig = DEFAULT_CONFIG):
+    def __init__(self, name: str, tests: list[KoriTest], *, config: KTConfig = DEFAULT_CONFIG):
         self.name = name
         self.tests = tests
-        self._config: KoriTestConfig
+        self._config: KTConfig
         self.config = config
 
     @property
@@ -96,22 +96,22 @@ class KoriTestGroup:
         return self._config
 
     @config.setter
-    def config(self, config: KoriTestConfig):
+    def config(self, config: KTConfig):
         self._config = config
         for test in [t for t in self.tests if t.config is DEFAULT_CONFIG]:
             test.config = self._config
 
     def run_test(self, code: str, file_path: str) -> KoriTestGroupResult:
         test_results = [test.run_test(code, file_path) for test in self.tests]
-        final_state = KoriTestState.combine(*[test_result.final_state for test_result in test_results])
+        final_state = KTState.combine(*[test_result.final_state for test_result in test_results])
         return KoriTestGroupResult(self, final_state, test_results)
 
 
 @dataclass
 class KoriTestGroupResult:
-    parent: KoriTestGroup
-    final_state: KoriTestState
-    test_results: list[KoriTestResult]
+    parent: KTGroup
+    final_state: KTState
+    test_results: list[KTResult]
 
     @property
     def name(self):
@@ -119,7 +119,7 @@ class KoriTestGroupResult:
 
 
 class KoriTest:
-    def __init__(self, name: str, actions: list[KoriTestAction | list], *, config: KoriTestConfig = DEFAULT_CONFIG,
+    def __init__(self, name: str, actions: list[KTAction | list], *, config: KTConfig = DEFAULT_CONFIG,
                  mocked_modules: list[str] = None):
         self.name = name
         self.actions = flatten(actions)
@@ -131,7 +131,7 @@ class KoriTest:
         return self._config
 
     @config.setter
-    def config(self, config: KoriTestConfig):
+    def config(self, config: KTConfig):
         self._config = config
         default = self.config.default_state_on_fail
         actions_states = self.config.actions_state_on_fail
@@ -141,7 +141,7 @@ class KoriTest:
             for sub_action in [sub_a for sub_a in action.sub_actions if sub_a.state_on_fail is None]:
                 sub_action.state_on_fail = actions_states.get(sub_action.action_name, default)
 
-    def _should_ignore(self, ctx: KoriTestCtx, fn: Callable, *fn_args, **fn_kwargs) -> Optional[KoriTestActionReport]:
+    def _should_ignore(self, ctx: KTCtx, fn: Callable, *fn_args, **fn_kwargs) -> Optional[KTActionReport]:
         result = None
         for ignored_action in self.config.ignored_actions:
             try:
@@ -154,7 +154,7 @@ class KoriTest:
 
         return result
 
-    def _action_called(self, fn: Callable, ctx: KoriTestCtx):
+    def _action_called(self, fn: Callable, ctx: KTCtx):
         def action_wrapper(*fn_args, **fn_kwargs):
             ctx.current_fn = fn
 
@@ -180,9 +180,9 @@ class KoriTest:
 
         return action_wrapper
 
-    def _kori_test_context(self, iter_action: list[KoriTestAction],
-                           test_report: list[KoriTestActionReport]) -> KoriTestCtx:
-        ctx = KoriTestCtx({}, {}, self, iter(iter_action), test_report)
+    def _kori_test_context(self, iter_action: list[KTAction],
+                           test_report: list[KTActionReport]) -> KTCtx:
+        ctx = KTCtx({}, {}, self, iter(iter_action), test_report)
         actions_with_mock = (action for action in [act for act in iter_action if act.mocked_fn is not None])
         mocked_functions = {mocked_fn for action in actions_with_mock for mocked_fn in action.mocked_fn}
         for fn in mocked_functions:
@@ -190,7 +190,7 @@ class KoriTest:
         ctx.locals_ = ctx.globals_
         return ctx
 
-    def _mock_modules(self, code: str, ctx: KoriTestCtx):
+    def _mock_modules(self, code: str, ctx: KTCtx):
         action_called = self._action_called
 
         for mocked_module in self.mocked_modules:
@@ -223,7 +223,7 @@ class KoriTest:
 
         return code
 
-    def _execute_code(self, code: str, file_path: str, ctx: KoriTestCtx, err: list[_KoriPythonError]):
+    def _execute_code(self, code: str, file_path: str, ctx: KTCtx, err: list[_KoriPythonError]):
         end_by_raise = False
 
         try:
@@ -237,9 +237,9 @@ class KoriTest:
             err.append(_KoriPythonError(f"{e.__class__.__name__}: \n{e}"))
 
     #
-    def run_test(self, code: str, file_path: str) -> KoriTestResult:
+    def run_test(self, code: str, file_path: str) -> KTResult:
         iter_action = flatten([self.config.before, self.actions, self.config.after])
-        test_report: list[KoriTestActionReport] = []
+        test_report: list[KTActionReport] = []
 
         ctx = self._kori_test_context(iter_action, test_report)
 
@@ -261,10 +261,10 @@ class KoriTest:
             err.append(_KoriTestInterrupt(f"Timed out: \nThe execution of the test took more than {timeout} seconds."
                                           f" Probably because of an infinite loop"))
 
-        state = KoriTestState.combine(*[report.result_state for report in test_report])
+        state = KTState.combine(*[report.result_state for report in test_report])
         if len(err) > 0:
             state.outcome = "Failure"
-            state.errors.append(KoriTestError("Python error", "-", str(err)))
+            state.errors.append(KTError("Python error", "-", str(err)))
 
         # if not end_by_raise and len(not_called) > 0:
         #     state.outcome = "Failure"
@@ -273,17 +273,17 @@ class KoriTest:
         while (next_action := ctx.next_action(force_next=True)) is not None:
             not_called.append(next_action)
 
-        return KoriTestResult(self, state,
-                              test_report, not_called=not_called, errors=err[0] if err else None)
+        return KTResult(self, state,
+                        test_report, not_called=not_called, errors=err[0] if err else None)
 
 
 @dataclass
-class KoriTestResult:
+class KTResult:
     parent: KoriTest
-    final_state: KoriTestState
-    test_reports: list[KoriTestActionReport]
-    not_called: list[KoriTestAction]
-    errors: list[KoriTestError] = field(default=None, kw_only=True)
+    final_state: KTState
+    test_reports: list[KTActionReport]
+    not_called: list[KTAction]
+    errors: list[KTError] = field(default=None, kw_only=True)
 
     @property
     def name(self):
@@ -291,21 +291,21 @@ class KoriTestResult:
 
 
 @dataclass
-class KoriTestState:
+class KTState:
     outcome: KoriTestOutcome = field(default="Success")
-    errors: list[KoriTestError] = field(default_factory=list, kw_only=True)
-    warnings: list[KoriTestWarning] = field(default_factory=list, kw_only=True)
+    errors: list[KTError] = field(default_factory=list, kw_only=True)
+    warnings: list[KTWarning] = field(default_factory=list, kw_only=True)
 
     @classmethod
-    def fail(cls, *errors: KoriTestFail):
+    def fail(cls, *errors: KTFail):
         return cls("Failure", errors=[*errors])
 
     @classmethod
-    def err(cls, *errors: KoriTestError):
+    def err(cls, *errors: KTError):
         return cls("Failure", errors=[*errors])
 
     @classmethod
-    def warn(cls, *warnings: KoriTestWarning, outcome: KoriTestOutcome = "Success"):
+    def warn(cls, *warnings: KTWarning, outcome: KoriTestOutcome = "Success"):
         return cls(outcome, warnings=[*warnings])
 
     @classmethod
@@ -313,14 +313,14 @@ class KoriTestState:
         return cls()
 
     def err_into_warn(self):
-        return KoriTestState(outcome="Success", warnings=self.warnings + [
-            KoriTestWarning(error.name, error.expected, error.actual) for error in self.errors
+        return KTState(outcome="Success", warnings=self.warnings + [
+            KTWarning(error.name, error.expected, error.actual) for error in self.errors
         ])
 
     def warn_into_err(self):
         if self.has_warning():
-            return KoriTestState(outcome="Failure", errors=self.errors + [
-                KoriTestError(warning.name, warning.expected, warning.actual) for warning in self.warnings
+            return KTState(outcome="Failure", errors=self.errors + [
+                KTError(warning.name, warning.expected, warning.actual) for warning in self.warnings
             ])
         return self
 
@@ -340,29 +340,29 @@ class KoriTestState:
         return len(self.warnings) != 0
 
     @staticmethod
-    def combine(*states: KoriTestState) -> KoriTestState:
-        final = KoriTestState.success()
+    def combine(*states: KTState) -> KTState:
+        final = KTState.success()
         for state in states:
             if final.is_failure() or state.is_failure():
-                final = KoriTestState("Failure", errors=final.errors + state.errors,
-                                      warnings=final.warnings + state.warnings)
+                final = KTState("Failure", errors=final.errors + state.errors,
+                                warnings=final.warnings + state.warnings)
             else:
-                final = KoriTestState("Success", warnings=final.warnings + state.warnings)
+                final = KTState("Success", warnings=final.warnings + state.warnings)
         return final
 
 
 @dataclass
-class KoriTestAction:
+class KTAction:
     action_name: str
-    action: Callable[[KoriTestCtx, ...], KoriTestActionResult]
+    action: Callable[[KTCtx, ...], KTActionResult]
     mocked_fn: Optional[list[Callable]] = None
-    sub_actions: list[KoriTestSubAction] = field(default_factory=list, kw_only=True)
+    sub_actions: list[KTSubAction] = field(default_factory=list, kw_only=True)
     action_args: list[Any] = field(default_factory=list, kw_only=True)
-    on_fail: Optional[KoriTestSubAction] = None
-    on_success: Optional[KoriTestSubAction] = None
+    on_fail: Optional[KTSubAction] = None
+    on_success: Optional[KTSubAction] = None
     state_on_fail: KoriStateOnFail = field(default=None, init=False)
 
-    def _call_sub_actions(self, ctx: KoriTestCtx) -> list[KoriTestSubActionReport]:
+    def _call_sub_actions(self, ctx: KTCtx) -> list[KTSubActionReport]:
         sub_action_results = []
         for sub_action in self.sub_actions:
             result_state = sub_action.action(ctx)
@@ -370,7 +370,7 @@ class KoriTestAction:
                 result_state = result_state.err_into_warn()
             else:
                 result_state = result_state.warn_into_err()
-            sub_action_results.append(KoriTestSubActionReport(
+            sub_action_results.append(KTSubActionReport(
                 action_name=sub_action.action_name,
                 result_state=result_state,
                 action_args=sub_action.action_args)
@@ -383,11 +383,11 @@ class KoriTestAction:
             return []
         return [mocked_fn.__name__ for mocked_fn in self.mocked_fn]
 
-    def call(self, ctx: KoriTestCtx, fn_name: str, *fn_args, **fn_kwargs) -> KoriTestActionReport:
+    def call(self, ctx: KTCtx, fn_name: str, *fn_args, **fn_kwargs) -> KTActionReport:
         if not self.mocks_fn(fn_name):
-            action_result = KoriTestActionResult(
-                KoriTestState.err(KoriTestError("<invalid call>", self.mocked_fn_names(),
-                                                f"{fn_name}({', '.join(map(repr, fn_args))})")),
+            action_result = KTActionResult(
+                KTState.err(KTError("<invalid call>", self.mocked_fn_names(),
+                                    f"{fn_name}({', '.join(map(repr, fn_args))})")),
                 end_test=True
             )
         else:
@@ -402,11 +402,11 @@ class KoriTestAction:
             sub_action_results = self._call_sub_actions(ctx)
         else:
             sub_action_results = []
-        result_state = KoriTestState.combine(action_result.result_state,
-                                             *[sub_action_result.result_state for sub_action_result
-                                               in sub_action_results])
+        result_state = KTState.combine(action_result.result_state,
+                                       *[sub_action_result.result_state for sub_action_result
+                                         in sub_action_results])
 
-        result = KoriTestActionReport(
+        result = KTActionReport(
             action_name=self.action_name,
             result_state=result_state,
             action_result=action_result,
@@ -429,19 +429,19 @@ class KoriTestAction:
         self.state_on_fail = "Error"
         return self
 
-    def also(self, *sub_actions: KoriTestSubAction):
+    def also(self, *sub_actions: KTSubAction):
         self.sub_actions += sub_actions
         return self
 
 
 @dataclass
-class KoriTestCtx:
+class KTCtx:
     globals_: dict[str, Any] = field(repr=False)
     locals_: dict[str, Any] = field(repr=False)
     _current_test: KoriTest
-    iter_actions: Iterator[KoriTestAction] = field(repr=False)
-    test_report: list[KoriTestActionReport]
-    current_action: Optional[KoriTestAction] = field(init=False, default=None)
+    iter_actions: Iterator[KTAction] = field(repr=False)
+    test_report: list[KTActionReport]
+    current_action: Optional[KTAction] = field(init=False, default=None)
     current_fn: Optional[Callable] = field(init=False, default=None)
     _stdout: str = ""
 
@@ -483,9 +483,9 @@ KoriStateOnFail: TypeAlias = Literal["Warning", "Error"]
 
 
 @dataclass
-class KoriTestSubAction:
+class KTSubAction:
     action_name: str
-    action: Callable[[KoriTestCtx], KoriTestState]
+    action: Callable[[KTCtx], KTState]
     action_args: list[Any] = field(default_factory=list)
     state_on_fail: KoriStateOnFail = field(default=None, init=False)
 
@@ -499,8 +499,8 @@ class KoriTestSubAction:
 
 
 @dataclass
-class KoriTestActionResult:
-    result_state: KoriTestState
+class KTActionResult:
+    result_state: KTState
     function_result: Any = field(default=None)
     is_done: bool = field(default=True, kw_only=True)
     end_test: bool = field(default=False, kw_only=True)
@@ -511,16 +511,16 @@ class KoriTestActionResult:
     @classmethod
     def success(cls, function_result: Any, *, end_test: bool = False,
                 is_done: bool = True, redo_with_next_action: bool = False):
-        return cls(KoriTestState.success(),
+        return cls(KTState.success(),
                    function_result=function_result,
                    end_test=end_test,
                    is_done=is_done,
                    redo_with_next_action=redo_with_next_action)
 
     @classmethod
-    def fail(cls, fail: KoriTestFail, function_result: Any, *, end_test: bool = False,
+    def fail(cls, fail: KTFail, function_result: Any, *, end_test: bool = False,
              is_done: bool = True, redo_with_next_action: bool = False):
-        return cls(KoriTestState.fail(fail),
+        return cls(KTState.fail(fail),
                    function_result=function_result,
                    end_test=end_test,
                    is_done=is_done,
@@ -528,21 +528,21 @@ class KoriTestActionResult:
 
 
 @dataclass(frozen=True, kw_only=True)
-class KoriTestActionReport:
+class KTActionReport:
     action_name: str
-    result_state: KoriTestState
-    action_result: KoriTestActionResult
+    result_state: KTState
+    action_result: KTActionResult
     action_args: list[Any]
     fn_name: str
     fn_args: list[Any]
     fn_kwargs: dict[str, Any]
-    sub_actions_reports: list[KoriTestSubActionReport]
+    sub_actions_reports: list[KTSubActionReport]
 
 
 @dataclass(frozen=True, kw_only=True)
-class KoriTestSubActionReport:
+class KTSubActionReport:
     action_name: str
-    result_state: KoriTestState
+    result_state: KTState
     action_args: list[Any]
 
 
@@ -573,7 +573,7 @@ class _KoriTestInterrupt(_KoriPythonError):
         super().__init__(msg)
 
 
-class KoriTestFail:
+class KTFail:
     def __init__(self, name: str, expected: Any, actual: Any):
         self.expected = expected
         self.actual = actual
@@ -584,12 +584,12 @@ class KoriTestFail:
         return f"Expected:{self.expected!r}, found:{self.actual!r}"
 
 
-class KoriTestError(KoriTestFail):
+class KTError(KTFail):
     def __init__(self, name: str, expected: Any, actual: Any):
         super().__init__(name, expected, actual)
 
 
-class KoriTestWarning(KoriTestFail):
+class KTWarning(KTFail):
     def __init__(self, name: str, expected: Any, actual: Any):
         super().__init__(name, expected, actual)
 
@@ -597,11 +597,11 @@ class KoriTestWarning(KoriTestFail):
 # ############################# Kori Result Formatter ############################# #
 
 class KoriResultFormatter:
-    def __init__(self, test_suite_result: KoriTestSuiteResult):
+    def __init__(self, test_suite_result: KTSuiteResult):
         self.test_suite_result = test_suite_result
 
     @staticmethod
-    def _get_state_icon(state: KoriTestState):
+    def _get_state_icon(state: KTState):
         if state.is_failure():
             return "❌"
         elif state.has_warning():
@@ -610,15 +610,15 @@ class KoriResultFormatter:
             return "✔"
 
     @staticmethod
-    def _format_error_or_warning(err_or_warn: KoriTestError | KoriTestWarning, prefix: str):
-        icon = "❌" if isinstance(err_or_warn, KoriTestError) else "⚠"
+    def _format_error_or_warning(err_or_warn: KTError | KTWarning, prefix: str):
+        icon = "❌" if isinstance(err_or_warn, KTError) else "⚠"
         return f"""{prefix}-{icon}- {err_or_warn.name}
 {prefix}| Expected: {err_or_warn.expected!r}
 {prefix}| Actual: {err_or_warn.actual!r}"""
 
     @classmethod
-    def _format_test_report(cls, test_report: KoriTestActionReport | KoriTestSubActionReport):
-        is_sub_action = isinstance(test_report, KoriTestSubActionReport)
+    def _format_test_report(cls, test_report: KTActionReport | KTSubActionReport):
+        is_sub_action = isinstance(test_report, KTSubActionReport)
         if is_sub_action:
             state = test_report.result_state
         else:
@@ -648,7 +648,7 @@ class KoriResultFormatter:
             formatted_result += "\n\t\t".join(self._format_test_reports(result).split("\n"))
         return formatted_result
 
-    def _format_test_reports(self, test_result: KoriTestResult | KoriTestGroupResult):
+    def _format_test_reports(self, test_result: KTResult | KoriTestGroupResult):
         if isinstance(test_result, KoriTestGroupResult):
             return self._format_test_group_result(test_result)
 
