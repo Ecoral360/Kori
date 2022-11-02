@@ -29,8 +29,8 @@ class KTConfig:
     after: list[KTAction] = field(default_factory=list)
     capture_stdout: bool = field(default=False)
     ignored_actions: list[KTAction] = field(default_factory=list)
-    default_state_on_fail: KoriStateOnFail = field(default="Warning")
-    actions_state_on_fail: dict[str, KoriStateOnFail] = field(default_factory=dict)
+    default_state_on_fail: KTStateOnFail = field(default="Warning")
+    actions_state_on_fail: dict[str, KTStateOnFail] = field(default_factory=dict)
     test_timeout: float = 3.0
 
     def with_fields(self, **kwargs):
@@ -71,7 +71,7 @@ class KTSuiteResult:
     parent: KTSuite
     code: str
     team: list[str]
-    test_results: list[KTResult | KoriTestGroupResult]
+    test_results: list[KTResult | KTGroupResult]
 
     def generate_result_file(self, dest_folder: str, *, file_prefix: str):
         if not os.path.exists(dest_folder):
@@ -101,14 +101,14 @@ class KTGroup:
         for test in [t for t in self.tests if t.config is DEFAULT_CONFIG]:
             test.config = self._config
 
-    def run_test(self, code: str, file_path: str) -> KoriTestGroupResult:
+    def run_test(self, code: str, file_path: str) -> KTGroupResult:
         test_results = [test.run_test(code, file_path) for test in self.tests]
         final_state = KTState.combine(*[test_result.final_state for test_result in test_results])
-        return KoriTestGroupResult(self, final_state, test_results)
+        return KTGroupResult(self, final_state, test_results)
 
 
 @dataclass
-class KoriTestGroupResult:
+class KTGroupResult:
     parent: KTGroup
     final_state: KTState
     test_results: list[KTResult]
@@ -258,7 +258,7 @@ class KoriTest:
         if execution.is_alive():  # the execution timed out
             print(f"Time out in {file_path}: \nThe execution of the test took more than {timeout} seconds.",
                   file=sys.stderr)
-            err.append(_KoriTestInterrupt(f"Timed out: \nThe execution of the test took more than {timeout} seconds."
+            err.append(_KTInterrupt(f"Timed out: \nThe execution of the test took more than {timeout} seconds."
                                           f" Probably because of an infinite loop"))
 
         state = KTState.combine(*[report.result_state for report in test_report])
@@ -292,7 +292,7 @@ class KTResult:
 
 @dataclass
 class KTState:
-    outcome: KoriTestOutcome = field(default="Success")
+    outcome: KTOutcome = field(default="Success")
     errors: list[KTError] = field(default_factory=list, kw_only=True)
     warnings: list[KTWarning] = field(default_factory=list, kw_only=True)
 
@@ -305,7 +305,7 @@ class KTState:
         return cls("Failure", errors=[*errors])
 
     @classmethod
-    def warn(cls, *warnings: KTWarning, outcome: KoriTestOutcome = "Success"):
+    def warn(cls, *warnings: KTWarning, outcome: KTOutcome = "Success"):
         return cls(outcome, warnings=[*warnings])
 
     @classmethod
@@ -360,7 +360,7 @@ class KTAction:
     action_args: list[Any] = field(default_factory=list, kw_only=True)
     on_fail: Optional[KTSubAction] = None
     on_success: Optional[KTSubAction] = None
-    state_on_fail: KoriStateOnFail = field(default=None, init=False)
+    state_on_fail: KTStateOnFail = field(default=None, init=False)
 
     def _call_sub_actions(self, ctx: KTCtx) -> list[KTSubActionReport]:
         sub_action_results = []
@@ -478,8 +478,8 @@ class KTCtx:
 
 # ############################# Types ############################# #
 
-KoriTestOutcome: TypeAlias = Literal["Success", "Failure"]
-KoriStateOnFail: TypeAlias = Literal["Warning", "Error"]
+KTOutcome: TypeAlias = Literal["Success", "Failure"]
+KTStateOnFail: TypeAlias = Literal["Warning", "Error"]
 
 
 @dataclass
@@ -487,7 +487,7 @@ class KTSubAction:
     action_name: str
     action: Callable[[KTCtx], KTState]
     action_args: list[Any] = field(default_factory=list)
-    state_on_fail: KoriStateOnFail = field(default=None, init=False)
+    state_on_fail: KTStateOnFail = field(default=None, init=False)
 
     def warn_on_fail(self):
         self.state_on_fail = "Warning"
@@ -568,7 +568,7 @@ class _KoriNoMoreTests(BaseException):
         super().__init__("There are no more actions defined in this test, did you forget to add `ignore_rest()` ?")
 
 
-class _KoriTestInterrupt(_KoriPythonError):
+class _KTInterrupt(_KoriPythonError):
     def __init__(self, msg: str):
         super().__init__(msg)
 
@@ -639,7 +639,7 @@ class KoriResultFormatter:
             result += "\n" + "\n".join(cls._format_error_or_warning(err, err_indent) for err in state.errors)
         return result + f"\n{err_indent}--\n"
 
-    def _format_test_group_result(self, test_result: KoriTestGroupResult):
+    def _format_test_group_result(self, test_result: KTGroupResult):
         name = test_result.name
         test_results = test_result.test_results
         final_result = test_result.final_state
@@ -648,8 +648,8 @@ class KoriResultFormatter:
             formatted_result += "\n\t\t".join(self._format_test_reports(result).split("\n"))
         return formatted_result
 
-    def _format_test_reports(self, test_result: KTResult | KoriTestGroupResult):
-        if isinstance(test_result, KoriTestGroupResult):
+    def _format_test_reports(self, test_result: KTResult | KTGroupResult):
+        if isinstance(test_result, KTGroupResult):
             return self._format_test_group_result(test_result)
 
         name = test_result.name
